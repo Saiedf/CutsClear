@@ -8,10 +8,10 @@
 # correct package for Dreambox and open-source Enigma2 images.
 #
 # Telnet command:
-# wget -O - "https://raw.githubusercontent.com/Saiedf/CutsClear/main/VER%201.3/installer_enhanced.sh" | /bin/sh
+# wget -O - "https://raw.githubusercontent.com/Saiedf/CutsClear/main/VER%201.3/installer_cutsclear1_3.sh" | /bin/sh
 #
 # Alternative command (download then run):
-# wget -O /tmp/installer_enhanced.sh "https://raw.githubusercontent.com/Saiedf/CutsClear/main/VER%201.3/installer_enhanced.sh" && chmod 755 /tmp/installer_enhanced.sh && /bin/sh /tmp/installer_enhanced.sh
+# wget -O /tmp/installer_cutsclear1_3.sh "https://raw.githubusercontent.com/Saiedf/CutsClear/main/VER%201.3/installer_cutsclear1_3.sh" && chmod 755 /tmp/installer_cutsclear1_3.sh && /bin/sh /tmp/installer_cutsclear1_3.sh
 # ==========================================================
 
 ########################################################################################################################
@@ -40,8 +40,9 @@ REPO_BRANCH='main'
 RELEASE_DIR='VER%201.3'
 
 # Package folders inside the selected release directory.
-DEB_DIR='Deb'
-IPK_DIR='Ipk'
+# Packages are stored in the same folder as this installer.
+DEB_DIR=''
+IPK_DIR=''
 
 # --------------------------------------------------------------
 # DREAMBOX / DREAMOS (.deb) packages
@@ -424,27 +425,52 @@ pick_ipk_file() {
 
 build_url() {
 	BASE_URL="https://raw.githubusercontent.com/$REPO_USER/$REPO_NAME/$REPO_BRANCH/$RELEASE_DIR"
-	if [ "$PKG_TYPE" = 'deb' ]; then
-		PKG_URL="$BASE_URL/$DEB_DIR/$PKG_FILE"
+	if [ -n "$PKG_SUBDIR" ]; then
+		PKG_URL="$BASE_URL/$PKG_SUBDIR/$PKG_FILE"
 	else
-		PKG_URL="$BASE_URL/$IPK_DIR/$PKG_FILE"
+		PKG_URL="$BASE_URL/$PKG_FILE"
 	fi
 }
 
-find_installed_version() {
-	OLD_VERSION=''
+has_deb_support() {
+	if have dpkg || have apt-get || have apt; then
+		return 0
+	fi
+	return 1
+}
 
-	if [ "$PKG_TYPE" = 'deb' ]; then
-		if have dpkg-query; then
-			OLD_VERSION=$(dpkg-query -W -f='${Status} ${Version}\n' "$PACKAGE_NAME" 2>/dev/null | awk '/install ok installed/ {print $4}')
-		fi
-	else
-		if have opkg; then
-			OLD_VERSION=$(opkg list-installed 2>/dev/null | awk -F ' - ' -v p="$PACKAGE_NAME" '$1==p {print $2; exit}')
+has_ipk_support() {
+	if have opkg; then
+		return 0
+	fi
+	return 1
+}
+
+detect_installed_package() {
+	OLD_VERSION=''
+	OLD_MANAGER=''
+
+	if have dpkg-query; then
+		OLD_VERSION=$(dpkg-query -W -f='${Status} ${Version}\n' "$PACKAGE_NAME" 2>/dev/null | awk '/install ok installed/ {print $4}')
+		if [ -n "$OLD_VERSION" ]; then
+			OLD_MANAGER='dpkg'
+			return 0
 		fi
 	fi
 
-	echo "$OLD_VERSION"
+	if have opkg; then
+		OLD_VERSION=$(opkg list-installed 2>/dev/null | awk -F ' - ' -v p="$PACKAGE_NAME" '$1==p {print $2; exit}')
+		if [ -n "$OLD_VERSION" ]; then
+			OLD_MANAGER='opkg'
+			return 0
+		fi
+	fi
+
+	return 1
+}
+
+normalize_answer() {
+	printf '%s' "$1" | tr -d '\r' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]'
 }
 
 find_old_plugin_paths() {
@@ -466,18 +492,28 @@ find_old_plugin_paths() {
 remove_installed_package() {
 	REMOVED_BY_MANAGER=0
 
-	if [ -n "$OLD_VERSION" ]; then
-		if [ "$PKG_TYPE" = 'deb' ]; then
-			dpkg -r "$PACKAGE_NAME"
-			REMOVED_BY_MANAGER=$?
-		else
-			opkg remove "$PACKAGE_NAME"
-			REMOVED_BY_MANAGER=$?
-		fi
+	if [ -z "$OLD_VERSION" ]; then
+		return 0
+	fi
 
-		if [ $REMOVED_BY_MANAGER -ne 0 ]; then
-			return $REMOVED_BY_MANAGER
-		fi
+	if [ "$OLD_MANAGER" = 'dpkg' ] && have dpkg; then
+		dpkg -r "$PACKAGE_NAME"
+		REMOVED_BY_MANAGER=$?
+	elif [ "$OLD_MANAGER" = 'opkg' ] && have opkg; then
+		opkg remove "$PACKAGE_NAME"
+		REMOVED_BY_MANAGER=$?
+	elif have dpkg; then
+		dpkg -r "$PACKAGE_NAME"
+		REMOVED_BY_MANAGER=$?
+	elif have opkg; then
+		opkg remove "$PACKAGE_NAME"
+		REMOVED_BY_MANAGER=$?
+	else
+		REMOVED_BY_MANAGER=1
+	fi
+
+	if [ $REMOVED_BY_MANAGER -ne 0 ]; then
+		return $REMOVED_BY_MANAGER
 	fi
 
 	return 0
@@ -532,7 +568,7 @@ confirm_old_version_removal() {
 	while true; do
 		printf 'Do you want to remove the old version and continue? [y/N]: '
 		read ANSWER
-		ANSWER=$(to_lower "$ANSWER")
+		ANSWER=$(normalize_answer "$ANSWER")
 		case "$ANSWER" in
 			y|yes)
 				say ''
@@ -581,18 +617,36 @@ download_package() {
 
 install_package() {
 	if [ "$PKG_TYPE" = 'deb' ]; then
-		dpkg -i --force-overwrite "$MY_TMP_FILE"
-		INSTALL_RET=$?
-		if have apt-get; then
-			apt-get install -f -y >/dev/null 2>&1
-		elif have apt; then
-			apt install -f -y >/dev/null 2>&1
+		if have dpkg; then
+			dpkg -i --force-overwrite "$MY_TMP_FILE"
+			INSTALL_RET=$?
+			if have apt-get; then
+				apt-get install -f -y >/dev/null 2>&1
+			elif have apt; then
+				apt install -f -y >/dev/null 2>&1
+			fi
+			return $INSTALL_RET
 		fi
-		return $INSTALL_RET
+
+		if have apt-get; then
+			apt-get install -y "$MY_TMP_FILE" >/dev/null 2>&1
+			return $?
+		fi
+
+		if have apt; then
+			apt install -y "$MY_TMP_FILE" >/dev/null 2>&1
+			return $?
+		fi
+
+		return 1
 	fi
 
-	opkg install --force-reinstall "$MY_TMP_FILE"
-	return $?
+	if have opkg; then
+		opkg install --force-reinstall "$MY_TMP_FILE"
+		return $?
+	fi
+
+	return 1
 }
 
 restart_enigma2() {
@@ -616,16 +670,35 @@ PYTHON_SERIES=$(detect_python_series)
 PYTHON_VERSION=$(detect_python_version)
 
 # Decide which package type to use.
-if have dpkg; then
-	PKG_TYPE='deb'
-	PKG_FILE=$(pick_deb_file)
+PKG_TYPE=''
+PKG_FILE=''
+PKG_SUBDIR=''
+
+# DreamOS / Dreambox images prefer .deb packages.
+if [ "$IMAGE_TYPE" = 'dreamos' ] || [ "$DEVICE_FAMILY" = 'dreambox' ]; then
+	if has_deb_support && [ -n "$(pick_deb_file)" ]; then
+		PKG_TYPE='deb'
+		PKG_FILE=$(pick_deb_file)
+		PKG_SUBDIR="$DEB_DIR"
+	elif has_ipk_support && [ -n "$(pick_ipk_file)" ]; then
+		PKG_TYPE='ipk'
+		PKG_FILE=$(pick_ipk_file)
+		PKG_SUBDIR="$IPK_DIR"
+	fi
 else
-	PKG_TYPE='ipk'
-	PKG_FILE=$(pick_ipk_file)
+	if has_ipk_support && [ -n "$(pick_ipk_file)" ]; then
+		PKG_TYPE='ipk'
+		PKG_FILE=$(pick_ipk_file)
+		PKG_SUBDIR="$IPK_DIR"
+	elif has_deb_support && [ -n "$(pick_deb_file)" ]; then
+		PKG_TYPE='deb'
+		PKG_FILE=$(pick_deb_file)
+		PKG_SUBDIR="$DEB_DIR"
+	fi
 fi
 
 # Validate package selection.
-if [ -z "$PKG_FILE" ]; then
+if [ -z "$PKG_FILE" ] || [ -z "$PKG_TYPE" ]; then
 	say ''
 	say 'No matching package was found for this image/device/Python combination.'
 	say "Image         : $IMAGE_TYPE"
@@ -638,7 +711,7 @@ fi
 
 build_url
 MY_TMP_FILE="/tmp/$PKG_FILE"
-OLD_VERSION=$(find_installed_version)
+detect_installed_package
 MY_SEP='============================================================='
 
 say ''
